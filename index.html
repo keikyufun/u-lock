@@ -40,7 +40,7 @@ body.live .st{display:none}
   <button class="ctl" id="mir">左右反転</button>
   <label class="ctl st">縦位置<input type="range" id="sy" min="10" max="80" value="45"></label>
   <label class="ctl st">遠近<input type="range" id="sp" min="30" max="100" value="70"></label>
-  <label class="ctl lv">高さ<input type="range" id="sh" min="10" max="80" value="35"></label>
+  <label class="ctl lv">距離<input type="range" id="sh" min="15" max="80" value="40"></label>
   <label class="ctl lv">視野<input type="range" id="sf" min="40" max="90" value="65"></label>
   <label class="ctl">大きさ<input type="range" id="sw" min="40" max="100" value="90"></label>
   <label class="ctl">奥行き<input type="range" id="sd" min="15" max="60" value="35"></label>
@@ -54,7 +54,8 @@ const sm=document.createElement('canvas'),sctx=sm.getContext('2d',{willReadFrequ
 const $=id=>document.getElementById(id);
 let W=0,H=0,camOn=false,mirror=false,audio=null;
 let gyro=false,R=null,placed=null,lastR=null,Rcal=null,still=0,stale=false;
-let P={y:.45,w:.9,d:.35,p:.7,s:5,h:.35,fv:65};
+let P={y:.45,w:.9,d:.35,p:.7,s:5,h:.4,fv:65};
+let tips=[],skin=null,camPitch=0;
 let base=null,cur=null,calState='none',calT=0,calN=0,calAcc=null,SW=160,SH=90;
 
 // keys
@@ -104,7 +105,7 @@ function setSrc(k,name,on){
   const any=Object.values(k.src).some(Boolean);
   if(any!==!!k.on){k.on=any;any?noteOn(k):noteOff(k);}
 }
-function releaseCam(){for(const k of keys)if(k.src.cam)setSrc(k,'cam',false);}
+function releaseCam(){tips=[];for(const k of keys)if(k.src.cam)setSrc(k,'cam',false);}
 
 // orientation
 function rotM(a,b,g){
@@ -126,10 +127,9 @@ function place(){
   const fx=-R[2],fy=-R[5],fz=-R[8];
   let psi=Math.atan2(fx,fy);
   if(Math.hypot(fx,fy)<.2)psi=Math.atan2(R[1],R[4]);
-  const phi=Math.min(Math.asin(Math.max(-1,Math.min(1,fz))),-.35);
-  const dist=P.h/Math.tan(-phi);
-  placed={psi,x:Math.sin(psi)*dist,y:Math.cos(psi)*dist};
-  Rcal=null;
+  const phi=Math.min(Math.asin(Math.max(-1,Math.min(1,fz))),-.26);
+  const D=P.h;
+  placed={psi,x:Math.sin(psi)*D*Math.cos(phi),y:Math.cos(psi)*D*Math.cos(phi),h:D*Math.sin(-phi),bw:.8*W*D/FL()};
 }
 
 // projection
@@ -141,9 +141,9 @@ function w2s(x,y,z){
 }
 function P2S(u,v,l=0){
   if(live()){
-    const Wm=P.w*.45,Dm=P.d*.4,sn=Math.sin(placed.psi),cs=Math.cos(placed.psi);
+    const Wm=placed.bw*P.w/.9,Dm=Wm*P.d,sn=Math.sin(placed.psi),cs=Math.cos(placed.psi);
     const a=(u-.5)*Wm,b=(.5-v)*Dm;
-    return w2s(placed.x+a*cs+b*sn,placed.y-a*sn+b*cs,-P.h+l);
+    return w2s(placed.x+a*cs+b*sn,placed.y-a*sn+b*cs,-placed.h+l);
   }
   const cx=W/2,yT=H*P.y,dh=H*P.d,pw=W*P.w,s=P.p+(1-P.p)*v;
   return [cx+(u-.5)*pw*s,yT+v*dh];
@@ -154,9 +154,9 @@ function toUV(x,y){
     const dx=rx*c+up*s,dy=-rx*s+up*c,dz=-1;
     const ex=R[0]*dx+R[1]*dy+R[2]*dz,ey=R[3]*dx+R[4]*dy+R[5]*dz,ez=R[6]*dx+R[7]*dy+R[8]*dz;
     if(ez>=-1e-3)return null;
-    const t=-P.h/ez,ddx=t*ex-placed.x,ddy=t*ey-placed.y;
+    const t=-placed.h/ez,ddx=t*ex-placed.x,ddy=t*ey-placed.y;
     const sn=Math.sin(placed.psi),cs=Math.cos(placed.psi);
-    return [(ddx*cs-ddy*sn)/(P.w*.45)+.5,.5-(ddx*sn+ddy*cs)/(P.d*.4)];
+    const Wm=placed.bw*P.w/.9;return [(ddx*cs-ddy*sn)/Wm+.5,.5-(ddx*sn+ddy*cs)/(Wm*P.d)];
   }
   const v=(y-H*P.y)/(H*P.d),s=P.p+(1-P.p)*v;
   return [(x-W/2)/(W*P.w*s)+.5,v];
@@ -179,7 +179,13 @@ function grab(){
   if(!drawCover(sctx,SW,SH))return false;
   const d=sctx.getImageData(0,0,SW,SH).data;
   if(!cur||cur.length!==SW*SH)cur=new Float32Array(SW*SH);
-  for(let i=0,j=0;i<d.length;i+=4,j++)cur[j]=d[i]*.3+d[i+1]*.59+d[i+2]*.11;
+  if(!skin||skin.length!==SW*SH)skin=new Uint8Array(SW*SH);
+  for(let i=0,j=0;i<d.length;i+=4,j++){
+    const r=d[i],g=d[i+1],b=d[i+2],y=r*.3+g*.59+b*.11;
+    cur[j]=y;
+    const cb=128-.1687*r-.3313*g+.5*b,cr=128+.5*r-.4187*g-.0813*b;
+    skin[j]=(y>40&&cb>77&&cb<127&&cr>133&&cr<173)?1:0;
+  }
   return true;
 }
 
@@ -202,24 +208,46 @@ function stepCal(){
 }
 
 // detect
+let lab=null,que=null;
 function detect(){
-  let gs=0;for(let i=0;i<cur.length;i++)gs+=cur[i]-base[i];gs/=cur.length;
-  const thr=75-P.s*7,k2=SW/W;
-  for(const k of keys){
-    const [a,b,c,d]=k.s;
-    const pts=[[a,c],[b,c],[b,d],[a,d]].map(([u,v])=>P2S(u,v));
-    if(pts.some(p=>!p)){setSrc(k,'cam',false);continue;}
-    const xs=pts.map(p=>p[0]*k2),ys=pts.map(p=>p[1]*k2);
-    let x0=Math.max(0,Math.floor(Math.min(...xs))),x1=Math.min(SW-1,Math.ceil(Math.max(...xs)));
-    let y0=Math.max(0,Math.floor(Math.min(...ys))),y1=Math.min(SH-1,Math.ceil(Math.max(...ys)));
-    if(mirror){const t=SW-1-x1;x1=SW-1-x0;x0=t;}
-    let n=0,hitN=0;
-    for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
-      const i=y*SW+x;n++;
-      if(Math.abs(cur[i]-base[i]-gs)>thr)hitN++;
+  const N=SW*SH;
+  if(!lab||lab.length!==N){lab=new Uint8Array(N);que=new Int32Array(N);}
+  let gs=0;for(let i=0;i<N;i++)gs+=cur[i]-base[i];gs/=N;
+  const thr=(75-P.s*7)*.5;
+  for(let i=0;i<N;i++)lab[i]=skin[i]&&Math.abs(cur[i]-base[i]-gs)>thr?1:0;
+  tips=[];
+  const minA=Math.max(8,N*.0008),kx=W/SW,ky=H/SH;
+  for(let s=0;s<N;s++){
+    if(lab[s]!==1)continue;
+    let qh=0,qt=0,sx=0,sy=0;que[qt++]=s;lab[s]=2;
+    while(qh<qt){
+      const p=que[qh++],x=p%SW,y=(p/SW)|0;sx+=x;sy+=y;
+      if(x>0&&lab[p-1]===1){lab[p-1]=2;que[qt++]=p-1;}
+      if(x<SW-1&&lab[p+1]===1){lab[p+1]=2;que[qt++]=p+1;}
+      if(y>0&&lab[p-SW]===1){lab[p-SW]=2;que[qt++]=p-SW;}
+      if(y<SH-1&&lab[p+SW]===1){lab[p+SW]=2;que[qt++]=p+SW;}
     }
-    const r=n?hitN/n:0;
-    setSrc(k,'cam',k.src.cam?r>.2:r>.4);
+    if(qt<minA)continue;
+    const cx=sx/qt,cy=sy/qt,req=Math.sqrt(qt/Math.PI),bd=new Float32Array(24),bi=new Int32Array(24).fill(-1);
+    let mx=0;
+    for(let n=0;n<qt;n++){
+      const p=que[n],x=p%SW,y=(p/SW)|0;
+      if(x<2||y<2||x>SW-3||y>SH-3)continue;
+      const d=Math.hypot(x-cx,y-cy),b=Math.min(23,Math.floor((Math.atan2(y-cy,x-cx)+Math.PI)/(2*Math.PI)*24));
+      if(d>bd[b]){bd[b]=d;bi[b]=p;}
+      if(d>mx)mx=d;
+    }
+    for(let b=0;b<24;b++){
+      if(bi[b]<0||bd[b]<req*1.35||bd[b]<mx*.6)continue;
+      if(bd[b]<bd[(b+23)%24]||bd[b]<bd[(b+1)%24])continue;
+      const p=bi[b];tips.push([(p%SW+.5)*kx,(((p/SW)|0)+.5)*ky]);
+    }
+  }
+  const down=new Set();
+  for(const t of tips){const k=hit(t[0],t[1]);if(k)down.add(k);}
+  for(const k of keys){
+    if(down.has(k)){k.miss=0;setSrc(k,'cam',true);}
+    else if(k.src.cam&&++k.miss>2)setSrc(k,'cam',false);
   }
 }
 
@@ -243,7 +271,7 @@ function drawPiano(){
     ctx.strokeStyle='rgba(255,255,255,.8)';
     ctx.shadowColor='#00e5ff';ctx.shadowBlur=k.on?28:6;ctx.fill();ctx.stroke();
   }
-  const L=live()?P.d*.4*.1:0;
+  const L=live()?placed.bw*P.w/.9*P.d*.1:0;
   for(const k of blacks){
     if(L){
       const f=[P2S(k.u0,.6,0),P2S(k.u1,.6,0),P2S(k.u1,.6,L),P2S(k.u0,.6,L)];
@@ -273,6 +301,7 @@ function frame(){
   }
   if(gyro&&R){
     if(!placed)place();
+    camPitch=Math.round(Math.asin(Math.max(-1,Math.min(1,-R[8])))*180/Math.PI);
     if(lastR){let d=0;for(let i=0;i<9;i++)d+=(R[i]-lastR[i])**2;still=d<2e-6?still+1:0;}
     lastR=R.slice();
     if(Rcal&&calState==='done'){let d=0;for(let i=0;i<9;i++)d+=(R[i]-Rcal[i])**2;if(Math.sqrt(d)>.04)stale=true;}
@@ -283,10 +312,12 @@ function frame(){
       releaseCam();stat.textContent='動かしたので検出を再調整…（じっとしてね）';
       if(still>45)startCal();
     }else if(base&&base.length===cur.length){
-      detect();stat.textContent=gyro?'演奏OK：机に向けて「ここに置く」で配置し直せるよ':'演奏OK：鍵盤の手前側に指を置いてね';
+      detect();stat.textContent='指先で弾いてね'+(gyro?'｜カメラ角度 '+camPitch+'°（下向きがマイナス）':'');
     }else stat.textContent='「キャリブレーション」を押してね';
   }
   drawPiano();
+  ctx.shadowBlur=0;ctx.fillStyle='#ffe14d';
+  for(const t of tips){ctx.beginPath();ctx.arc(t[0],t[1],6,0,7);ctx.fill();}
   requestAnimationFrame(frame);
 }
 
@@ -337,6 +368,7 @@ $('gear').onclick=()=>$('panel').classList.toggle('hide');
 [['sy','y',100],['sw','w',100],['sd','d',100],['sp','p',100],['ss','s',1],['sh','h',100],['sf','fv',1]].forEach(([id,key,div])=>{
   $(id).oninput=e=>{P[key]=+e.target.value/div;};
 });
+$('sh').addEventListener('input',()=>{if(R)place();});
 resize();frame();
 </script>
 </body>
