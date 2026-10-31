@@ -18,7 +18,10 @@ button:active{background:rgba(0,229,255,.4)}
 #panel{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(env(safe-area-inset-bottom,0px) + 10px);background:rgba(5,10,25,.72);backdrop-filter:blur(6px);display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:center;font-size:12px}
 #panel.hide .ctl{display:none}
 label{display:flex;align-items:center;gap:6px}
-input[type=range]{width:96px}
+input[type=range]{width:90px}
+.lv{display:none}
+body.live .lv{display:flex}
+body.live .st{display:none}
 </style>
 </head>
 <body>
@@ -26,18 +29,21 @@ input[type=range]{width:96px}
 <div id="status"></div>
 <div id="start">
   <h1>AR Piano</h1>
-  <p>机をカメラに映すと、その上にピアノが浮かびます。鍵盤の位置に指を置くと音が鳴ります。カメラなしでも、タッチ・クリック・PCキーボード（A S D F…）で弾けます。</p>
+  <p>机にカメラを向けると、ピアノが机の上に固定されます。スマホを動かすと、実物のように見る角度が変わります。鍵盤に指を置くと音が鳴ります（タッチ・クリック・PCキーボードでもOK）。スタンドに立てて使うのがおすすめ。</p>
   <button id="big">カメラで始める</button>
   <button id="nocam">カメラなしで始める</button>
 </div>
 <div id="panel">
   <button id="gear">⚙ 設定</button>
+  <button class="ctl lv" id="place">ここに置く</button>
   <button class="ctl" id="cal">キャリブレーション</button>
   <button class="ctl" id="mir">左右反転</button>
-  <label class="ctl">縦位置<input type="range" id="sy" min="10" max="80" value="45"></label>
-  <label class="ctl">幅<input type="range" id="sw" min="40" max="100" value="90"></label>
+  <label class="ctl st">縦位置<input type="range" id="sy" min="10" max="80" value="45"></label>
+  <label class="ctl st">遠近<input type="range" id="sp" min="30" max="100" value="70"></label>
+  <label class="ctl lv">高さ<input type="range" id="sh" min="10" max="80" value="35"></label>
+  <label class="ctl lv">視野<input type="range" id="sf" min="40" max="90" value="65"></label>
+  <label class="ctl">大きさ<input type="range" id="sw" min="40" max="100" value="90"></label>
   <label class="ctl">奥行き<input type="range" id="sd" min="15" max="60" value="35"></label>
-  <label class="ctl">遠近<input type="range" id="sp" min="30" max="100" value="70"></label>
   <label class="ctl">感度<input type="range" id="ss" min="1" max="9" value="5"></label>
 </div>
 <video id="vid" playsinline muted style="display:none"></video>
@@ -47,28 +53,28 @@ const vid=document.getElementById('vid'),stat=document.getElementById('status');
 const sm=document.createElement('canvas'),sctx=sm.getContext('2d',{willReadFrequently:true});
 const $=id=>document.getElementById(id);
 let W=0,H=0,camOn=false,mirror=false,audio=null;
-let P={y:.45,w:.9,d:.35,p:.7,s:5};
+let gyro=false,R=null,placed=null,lastR=null,Rcal=null,still=0,stale=false;
+let P={y:.45,w:.9,d:.35,p:.7,s:5,h:.35,fv:65};
 let base=null,cur=null,calState='none',calT=0,calN=0,calAcc=null,SW=160,SH=90;
 
 // keys
 const NW=14,off=[0,2,4,5,7,9,11],keys=[];
 for(let i=0;i<NW;i++){
   const m=60+Math.floor(i/7)*12+off[i%7],w=1/NW;
-  keys.push({midi:m,black:false,i,u0:i/NW,u1:(i+1)/NW,v0:0,v1:1,
-    s:[i/NW+w*.2,(i+1)/NW-w*.2,.68,.95],name:['C','D','E','F','G','A','B'][i%7]+(4+Math.floor(i/7)),src:{}});
+  keys.push({midi:m,black:false,i,u0:i/NW,u1:(i+1)/NW,s:[i/NW+w*.2,(i+1)/NW-w*.2,.68,.95],
+    name:['C','D','E','F','G','A','B'][i%7]+(4+Math.floor(i/7)),src:{}});
 }
-const blackAfter=[0,1,3,4,5];
 for(let i=0;i<NW-1;i++){
-  if(!blackAfter.includes(i%7))continue;
-  const c=(i+1)/NW,bw=.6/NW,m=keys[i].midi+1;
-  keys.push({midi:m,black:true,wi:i,u0:c-bw/2,u1:c+bw/2,v0:0,v1:.6,s:[c-bw*.35,c+bw*.35,.12,.48],src:{}});
+  if(![0,1,3,4,5].includes(i%7))continue;
+  const c=(i+1)/NW,bw=.6/NW;
+  keys.push({midi:keys[i].midi+1,black:true,wi:i,u0:c-bw/2,u1:c+bw/2,s:[c-bw*.35,c+bw*.35,.12,.48],src:{}});
 }
 const whites=keys.filter(k=>!k.black),blacks=keys.filter(k=>k.black);
 
 // audio
 const active=new Map();
 function ensureAudio(){
-  if(!audio){audio=new (window.AudioContext||window.webkitAudioContext)();}
+  if(!audio)audio=new (window.AudioContext||window.webkitAudioContext)();
   if(audio.state!=='running')audio.resume();
 }
 function noteOn(k){
@@ -98,17 +104,66 @@ function setSrc(k,name,on){
   const any=Object.values(k.src).some(Boolean);
   if(any!==!!k.on){k.on=any;any?noteOn(k):noteOff(k);}
 }
+function releaseCam(){for(const k of keys)if(k.src.cam)setSrc(k,'cam',false);}
+
+// orientation
+function rotM(a,b,g){
+  const d=Math.PI/180;a*=d;b*=d;g*=d;
+  const ca=Math.cos(a),sa=Math.sin(a),cb=Math.cos(b),sb=Math.sin(b),cg=Math.cos(g),sg=Math.sin(g);
+  return [ca*cg-sa*sb*sg,-cb*sa,cg*sa*sb+ca*sg, cg*sa+ca*sb*sg,ca*cb,sa*sg-ca*cg*sb, -cb*sg,sb,cb*cg];
+}
+addEventListener('deviceorientation',e=>{
+  if(e.alpha==null||e.beta==null)return;
+  const r=rotM(e.alpha,e.beta,e.gamma);
+  R=R?R.map((v,i)=>v+(r[i]-v)*.6):r;
+  if(!gyro){gyro=true;document.body.classList.add('live');}
+});
+const orA=()=>((screen.orientation?screen.orientation.angle:window.orientation)||0)*Math.PI/180;
+const FL=()=>Math.max(W,H)/2/Math.tan(P.fv*Math.PI/360);
+const live=()=>gyro&&placed&&R;
+function place(){
+  if(!R)return;
+  const fx=-R[2],fy=-R[5],fz=-R[8];
+  let psi=Math.atan2(fx,fy);
+  if(Math.hypot(fx,fy)<.2)psi=Math.atan2(R[1],R[4]);
+  const phi=Math.min(Math.asin(Math.max(-1,Math.min(1,fz))),-.35);
+  const dist=P.h/Math.tan(-phi);
+  placed={psi,x:Math.sin(psi)*dist,y:Math.cos(psi)*dist};
+  Rcal=null;
+}
 
 // projection
-function geom(){return{cx:W/2,yT:H*P.y,dh:H*P.d,pw:W*P.w};}
-function proj(u,v,g){const s=P.p+(1-P.p)*v;return[g.cx+(u-.5)*g.pw*s,g.yT+v*g.dh];}
-function quad(c,u0,u1,v0,v1,g){
-  const a=proj(u0,v0,g),b=proj(u1,v0,g),d=proj(u1,v1,g),e=proj(u0,v1,g);
-  c.beginPath();c.moveTo(...a);c.lineTo(...b);c.lineTo(...d);c.lineTo(...e);c.closePath();
+function w2s(x,y,z){
+  const dx=R[0]*x+R[3]*y+R[6]*z,dy=R[1]*x+R[4]*y+R[7]*z,dz=R[2]*x+R[5]*y+R[8]*z;
+  const f=-dz;if(f<.03)return null;
+  const th=orA(),c=Math.cos(th),s=Math.sin(th),F=FL();
+  return [W/2+F*(dx*c-dy*s)/f,H/2-F*(dx*s+dy*c)/f];
+}
+function P2S(u,v,l=0){
+  if(live()){
+    const Wm=P.w*.45,Dm=P.d*.4,sn=Math.sin(placed.psi),cs=Math.cos(placed.psi);
+    const a=(u-.5)*Wm,b=(.5-v)*Dm;
+    return w2s(placed.x+a*cs+b*sn,placed.y-a*sn+b*cs,-P.h+l);
+  }
+  const cx=W/2,yT=H*P.y,dh=H*P.d,pw=W*P.w,s=P.p+(1-P.p)*v;
+  return [cx+(u-.5)*pw*s,yT+v*dh];
+}
+function toUV(x,y){
+  if(live()){
+    const F=FL(),rx=(x-W/2)/F,up=-(y-H/2)/F,th=orA(),c=Math.cos(th),s=Math.sin(th);
+    const dx=rx*c+up*s,dy=-rx*s+up*c,dz=-1;
+    const ex=R[0]*dx+R[1]*dy+R[2]*dz,ey=R[3]*dx+R[4]*dy+R[5]*dz,ez=R[6]*dx+R[7]*dy+R[8]*dz;
+    if(ez>=-1e-3)return null;
+    const t=-P.h/ez,ddx=t*ex-placed.x,ddy=t*ey-placed.y;
+    const sn=Math.sin(placed.psi),cs=Math.cos(placed.psi);
+    return [(ddx*cs-ddy*sn)/(P.w*.45)+.5,.5-(ddx*sn+ddy*cs)/(P.d*.4)];
+  }
+  const v=(y-H*P.y)/(H*P.d),s=P.p+(1-P.p)*v;
+  return [(x-W/2)/(W*P.w*s)+.5,v];
 }
 function hit(x,y){
-  const g=geom(),v=(y-g.yT)/g.dh;if(v<0||v>1)return null;
-  const s=P.p+(1-P.p)*v,u=(x-g.cx)/(g.pw*s)+.5;if(u<0||u>1)return null;
+  const q=toUV(x,y);if(!q)return null;
+  const [u,v]=q;if(v<0||v>1||u<0||u>1)return null;
   if(v<.6)for(const k of blacks)if(u>=k.u0&&u<=k.u1)return k;
   return whites[Math.min(NW-1,Math.floor(u*NW))];
 }
@@ -129,17 +184,19 @@ function grab(){
 }
 
 // calibration
-function startCal(){if(!camOn)return;base=null;calState='count';calT=performance.now()+3000;}
+function startCal(){if(!camOn)return;releaseCam();base=null;calState='count';calT=performance.now()+3000;}
 function stepCal(){
-  const now=performance.now();
   if(calState==='count'){
-    const r=Math.ceil((calT-now)/1000);
+    const r=Math.ceil((calT-performance.now())/1000);
     if(r>0){stat.textContent='手を画面の外へ… '+r;return;}
     calState='grab';calN=0;calAcc=new Float32Array(SW*SH);
   }
   if(calState==='grab'){
     for(let i=0;i<calAcc.length;i++)calAcc[i]+=cur[i];
-    if(++calN>=8){for(let i=0;i<calAcc.length;i++)calAcc[i]/=calN;base=calAcc;calState='done';}
+    if(++calN>=8){
+      for(let i=0;i<calAcc.length;i++)calAcc[i]/=calN;
+      base=calAcc;calState='done';Rcal=R?R.slice():null;stale=false;
+    }
     stat.textContent='読み取り中…';
   }
 }
@@ -147,9 +204,11 @@ function stepCal(){
 // detect
 function detect(){
   let gs=0;for(let i=0;i<cur.length;i++)gs+=cur[i]-base[i];gs/=cur.length;
-  const thr=75-P.s*7,g=geom(),k2=SW/W;
+  const thr=75-P.s*7,k2=SW/W;
   for(const k of keys){
-    const [a,b,c,d]=k.s,pts=[proj(a,c,g),proj(b,c,g),proj(b,d,g),proj(a,d,g)];
+    const [a,b,c,d]=k.s;
+    const pts=[[a,c],[b,c],[b,d],[a,d]].map(([u,v])=>P2S(u,v));
+    if(pts.some(p=>!p)){setSrc(k,'cam',false);continue;}
     const xs=pts.map(p=>p[0]*k2),ys=pts.map(p=>p[1]*k2);
     let x0=Math.max(0,Math.floor(Math.min(...xs))),x1=Math.min(SW-1,Math.ceil(Math.max(...xs)));
     let y0=Math.max(0,Math.floor(Math.min(...ys))),y1=Math.min(SH-1,Math.ceil(Math.max(...ys)));
@@ -159,34 +218,50 @@ function detect(){
       const i=y*SW+x;n++;
       if(Math.abs(cur[i]-base[i]-gs)>thr)hitN++;
     }
-    const r=n?hitN/n:0,was=!!k.src.cam;
-    setSrc(k,'cam',was?r>.2:r>.4);
+    const r=n?hitN/n:0;
+    setSrc(k,'cam',k.src.cam?r>.2:r>.4);
   }
 }
 
 // draw
+function path(p){ctx.beginPath();p.forEach((q,i)=>i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]));ctx.closePath();}
+function qd(u0,u1,v0,v1,l=0){
+  const p=[P2S(u0,v0,l),P2S(u1,v0,l),P2S(u1,v1,l),P2S(u0,v1,l)];
+  return p.some(x=>!x)?null:p;
+}
 function drawPiano(){
-  const g=geom();
   ctx.lineWidth=1.5;
+  let q=qd(-.03,1.03,-.12,1.12);
+  if(q){
+    path(q);ctx.shadowBlur=0;ctx.fillStyle='rgba(0,229,255,.08)';
+    ctx.strokeStyle='rgba(0,229,255,.5)';ctx.setLineDash([6,5]);ctx.fill();ctx.stroke();ctx.setLineDash([]);
+  }
   for(const k of whites){
-    quad(ctx,k.u0+.002,k.u1-.002,0,1,g);
-    ctx.fillStyle=k.on?'rgba(0,229,255,.6)':'rgba(255,255,255,.26)';
-    ctx.strokeStyle='rgba(255,255,255,.75)';
-    ctx.shadowColor='#00e5ff';ctx.shadowBlur=k.on?28:6;
-    ctx.fill();ctx.stroke();
+    q=qd(k.u0+.002,k.u1-.002,0,1);if(!q)continue;
+    path(q);
+    ctx.fillStyle=k.on?'rgba(0,229,255,.6)':'rgba(255,255,255,.3)';
+    ctx.strokeStyle='rgba(255,255,255,.8)';
+    ctx.shadowColor='#00e5ff';ctx.shadowBlur=k.on?28:6;ctx.fill();ctx.stroke();
   }
+  const L=live()?P.d*.4*.1:0;
   for(const k of blacks){
-    quad(ctx,k.u0,k.u1,0,.6,g);
-    ctx.fillStyle=k.on?'rgba(255,64,160,.85)':'rgba(10,14,30,.66)';
-    ctx.strokeStyle='rgba(0,229,255,.85)';
-    ctx.shadowColor=k.on?'#ff40a0':'#00e5ff';ctx.shadowBlur=k.on?28:8;
-    ctx.fill();ctx.stroke();
+    if(L){
+      const f=[P2S(k.u0,.6,0),P2S(k.u1,.6,0),P2S(k.u1,.6,L),P2S(k.u0,.6,L)];
+      if(!f.some(x=>!x)){path(f);ctx.shadowBlur=0;ctx.fillStyle='rgba(0,40,60,.75)';ctx.fill();}
+    }
+    q=qd(k.u0,k.u1,0,.6,L);if(!q)continue;
+    path(q);
+    ctx.fillStyle=k.on?'rgba(255,64,160,.85)':'rgba(10,14,30,.7)';
+    ctx.strokeStyle='rgba(0,229,255,.9)';
+    ctx.shadowColor=k.on?'#ff40a0':'#00e5ff';ctx.shadowBlur=k.on?28:8;ctx.fill();ctx.stroke();
   }
-  ctx.shadowBlur=0;ctx.fillStyle='rgba(255,255,255,.8)';ctx.textAlign='center';
+  ctx.shadowBlur=0;ctx.fillStyle='rgba(255,255,255,.85)';ctx.textAlign='center';
   for(const k of whites){
     if(k.i%7)continue;
-    const p=proj((k.u0+k.u1)/2,.88,g);
-    ctx.font=Math.max(10,g.pw/NW*.3)+'px system-ui';ctx.fillText(k.name,p[0],p[1]);
+    const a=P2S(k.u0,.88),b=P2S(k.u1,.88),c=P2S((k.u0+k.u1)/2,.88);
+    if(!a||!b||!c)continue;
+    ctx.font=Math.max(9,Math.hypot(a[0]-b[0],a[1]-b[1])*.35)+'px system-ui';
+    ctx.fillText(k.name,c[0],c[1]);
   }
 }
 function frame(){
@@ -196,10 +271,20 @@ function frame(){
     const gr=ctx.createLinearGradient(0,0,0,H);gr.addColorStop(0,'#0a1230');gr.addColorStop(1,'#05070f');
     ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);
   }
+  if(gyro&&R){
+    if(!placed)place();
+    if(lastR){let d=0;for(let i=0;i<9;i++)d+=(R[i]-lastR[i])**2;still=d<2e-6?still+1:0;}
+    lastR=R.slice();
+    if(Rcal&&calState==='done'){let d=0;for(let i=0;i<9;i++)d+=(R[i]-Rcal[i])**2;if(Math.sqrt(d)>.04)stale=true;}
+  }
   if(ok&&grab()){
     if(calState==='count'||calState==='grab')stepCal();
-    else if(base&&base.length===cur.length){detect();stat.textContent='演奏OK：鍵盤の手前側に指を置いてね';}
-    else stat.textContent='「キャリブレーション」を押してね';
+    else if(stale){
+      releaseCam();stat.textContent='動かしたので検出を再調整…（じっとしてね）';
+      if(still>45)startCal();
+    }else if(base&&base.length===cur.length){
+      detect();stat.textContent=gyro?'演奏OK：机に向けて「ここに置く」で配置し直せるよ':'演奏OK：鍵盤の手前側に指を置いてね';
+    }else stat.textContent='「キャリブレーション」を押してね';
   }
   drawPiano();
   requestAnimationFrame(frame);
@@ -229,21 +314,27 @@ function kbKey(e){
 addEventListener('keydown',e=>{if(e.repeat)return;const k=kbKey(e);if(k){ensureAudio();setSrc(k,'kb',true);}});
 addEventListener('keyup',e=>{const k=kbKey(e);if(k)setSrc(k,'kb',false);});
 
+async function askMotion(){
+  try{
+    if(window.DeviceOrientationEvent&&typeof DeviceOrientationEvent.requestPermission==='function')
+      await DeviceOrientationEvent.requestPermission();
+  }catch(e){}
+}
 async function startCam(){
   try{
     const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}},audio:false});
     vid.srcObject=s;await vid.play();camOn=true;
-    const t=s.getVideoTracks()[0].getSettings();
-    mirror=t.facingMode==='user';
+    mirror=s.getVideoTracks()[0].getSettings().facingMode==='user';
     setTimeout(startCal,800);
   }catch(err){stat.textContent='カメラ不可（'+(err&&err.name||'unknown')+'）：タッチ／クリック／キーボードで弾けるよ';}
 }
-$('big').onclick=()=>{ensureAudio();$('start').remove();startCam();};
-$('nocam').onclick=()=>{ensureAudio();$('start').remove();stat.textContent='タッチ／クリック／キーボード（A S D F…）で演奏';};
+$('big').onclick=async()=>{ensureAudio();await askMotion();$('start').remove();startCam();};
+$('nocam').onclick=async()=>{ensureAudio();await askMotion();$('start').remove();stat.textContent='タッチ／クリック／キーボード（A S D F…）で演奏';};
 $('cal').onclick=startCal;
+$('place').onclick=place;
 $('mir').onclick=()=>{mirror=!mirror;startCal();};
 $('gear').onclick=()=>$('panel').classList.toggle('hide');
-[['sy','y',100],['sw','w',100],['sd','d',100],['sp','p',100],['ss','s',1]].forEach(([id,key,div])=>{
+[['sy','y',100],['sw','w',100],['sd','d',100],['sp','p',100],['ss','s',1],['sh','h',100],['sf','fv',1]].forEach(([id,key,div])=>{
   $(id).oninput=e=>{P[key]=+e.target.value/div;};
 });
 resize();frame();
