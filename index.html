@@ -165,17 +165,27 @@ function seg(a,b){
   ctx.moveTo(W/2+F*p[0]/p[2],H/2-F*p[1]/p[2]);ctx.lineTo(W/2+F*q[0]/q[2],H/2-F*q[1]/q[2]);
 }
 function drawGrid(){
-  const n=12,s=.25;
-  ctx.shadowBlur=0;ctx.lineWidth=1;
+  // 床面上の設置位置を中心に、短く見やすいグリッドを描く
+  if(!placed)return;
+  const n=6,step=.25,ps=PSI(),sn=Math.sin(ps),cs=Math.cos(ps);
+  const cx=placed.x,cy=placed.y;
+  const floorPoint=(x,y)=>{
+    const wx=cx+x*cs+y*sn, wy=cy-x*sn+y*cs;
+    return [wx,wy,-P.h];
+  };
+  ctx.save();ctx.shadowBlur=0;ctx.lineWidth=1;
   for(let pass=0;pass<2;pass++){
     ctx.beginPath();
     for(let i=-n;i<=n;i++){
       if((i%4===0)!==(pass===1))continue;
-      seg([i*s,-n*s,-P.h],[i*s,n*s,-P.h]);
-      seg([-n*s,i*s,-P.h],[n*s,i*s,-P.h]);
+      const v=i*step;
+      seg(floorPoint(v,-n*step),floorPoint(v,n*step));
+      seg(floorPoint(-n*step,v),floorPoint(n*step,v));
     }
-    ctx.strokeStyle=pass?'rgba(0,229,255,.7)':'rgba(0,229,255,.28)';ctx.stroke();
+    ctx.strokeStyle=pass?'rgba(0,229,255,.72)':'rgba(0,229,255,.25)';
+    ctx.stroke();
   }
+  ctx.restore();
 }
 const FL=()=>Math.max(W,H)/2/Math.tan(P.fv*Math.PI/360);
 const live=()=>gyro&&placed&&R;
@@ -249,7 +259,7 @@ function grab(){
 }
 
 // calibration
-function startCal(){if(!camOn)return;releaseCam();base=null;calState='count';calT=performance.now()+3000;}
+function startCal(){if(!camOn)return;releaseCam();base=null;calState='count';calT=performance.now()+900;}
 function stepCal(){
   if(calState==='count'){
     const r=Math.ceil((calT-performance.now())/1000);
@@ -258,7 +268,7 @@ function stepCal(){
   }
   if(calState==='grab'){
     for(let i=0;i<calAcc.length;i++)calAcc[i]+=cur[i];
-    if(++calN>=8){
+    if(++calN>=4){
       for(let i=0;i<calAcc.length;i++)calAcc[i]/=calN;
       base=calAcc;calState='done';Rcal=R?R.slice():null;stale=false;
     }
@@ -370,7 +380,7 @@ function frame(){
     if(calState==='count'||calState==='grab')stepCal();
     else if(stale){
       releaseCam();stat.textContent='動かしたので検出を再調整…（じっとしてね）';
-      if(still>45)startCal();
+      if(still>18)startCal();
     }else if(base&&base.length===cur.length){
       detect();if(!scan&&!placing)stat.textContent='指先で弾いてね'+(gyro?'｜'+fmsg+'｜角度 '+camPitch+'°':'');
     }else stat.textContent='「キャリブレーション」を押してね';
@@ -421,7 +431,7 @@ async function startCam(){
     const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}},audio:false});
     vid.srcObject=s;await vid.play();camOn=true;
     mirror=s.getVideoTracks()[0].getSettings().facingMode==='user';
-    setTimeout(startCal,800);
+    setTimeout(()=>{startCal();scan=performance.now()+3000;scanN=0;scanDot=0;scanZ=0;},800);
   }catch(err){stat.textContent='カメラ不可（'+(err&&err.name||'unknown')+'）：タッチ／クリック／キーボードで弾けるよ';}
 }
 $('big').onclick=async()=>{ensureAudio();await askMotion();$('start').remove();startCam();};
