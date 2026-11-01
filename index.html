@@ -35,6 +35,9 @@ input[type=range]{width:100px}
   <button class="ctl" id="place">床に置き直す</button>
   <button class="ctl" id="grid">グリッド</button>
   <button class="ctl" id="mir">左右反転</button>
+  <button class="ctl" id="hand">手を登録</button>
+  <button class="ctl" id="mask">手の表示</button>
+  <label class="ctl">向き<input type="range" id="sr" min="-180" max="180" value="0"></label>
   <label class="ctl">感度<input type="range" id="ss" min="1" max="9" value="5"></label>
 </div>
 <video id="vid" playsinline muted style="display:none"></video>
@@ -47,11 +50,12 @@ let W=0,H=0,camOn=false,mirror=false,audio=null,showGrid=true;
 const SW=192,D=.4;let SH=256,SH0=0,kx=1,ky=1,P={s:5};
 let Hs=null,pts=[],lost=0,motion=0,frameN=0,inl=0,G=null,Gp=null,rgba=null;
 let placing=false,taps=[],tips=[];
+let rot=0,cs=1,sn=0,hm=null,enrolling=false,showMask=true,accN=0,bqN=0;
 
 // rectified floor patch
-const RW=132,RH=144,PX0=-.05,PY0=-.25,DX=1.1/132,RN=RW*RH;
+const RW=132,RH=153,PX0=-.15,PY0=-.55,DX=1.3/132,RN=RW*RH;
 const cu=new Float32Array(3*RN),ref=new Float32Array(3*RN),racc=new Float32Array(3*RN);
-const valid=new Uint8Array(RN),refV=new Uint8Array(RN),lab=new Uint8Array(RN),que=new Int32Array(RN);
+const valid=new Uint8Array(RN),refV=new Uint8Array(RN),lab=new Uint8Array(RN),que=new Int32Array(RN),acc=new Int32Array(RN),bq=new Int32Array(RN);
 let refState=0,refT=0,refN=0;
 
 // keys
@@ -236,6 +240,26 @@ function rectify(){
     }
   }
 }
+function toLoc(X,Y){const dx=X-.5,dy=Y-D/2;return [.5+dx*cs+dy*sn,D/2-dx*sn+dy*cs];}
+function PL(x,y){const dx=x-.5,dy=y-D/2;return P2S(.5+dx*cs-dy*sn,D/2+dx*sn+dy*cs);}
+function colorOK(y,cb,cr){
+  const a=(cb-hm.cb)/hm.scb,b=(cr-hm.cr)/hm.scr,c=(y-hm.y)/hm.sy;
+  return a*a+b*b<9&&Math.abs(c)<2.5;
+}
+function learnHand(){
+  if(bqN<40)return false;
+  let idx=Array.from(bq.subarray(0,bqN)),m=[0,0,0],s=[0,0,0];
+  for(let pass=0;pass<2;pass++){
+    m=[0,0,0];for(const p of idx){m[0]+=cu[p];m[1]+=cu[RN+p];m[2]+=cu[2*RN+p];}
+    m=m.map(v=>v/idx.length);
+    s=[0,0,0];for(const p of idx){s[0]+=(cu[p]-m[0])**2;s[1]+=(cu[RN+p]-m[1])**2;s[2]+=(cu[2*RN+p]-m[2])**2;}
+    s=s.map(v=>Math.sqrt(v/idx.length));
+    if(pass===0)idx=idx.filter(p=>Math.abs(cu[RN+p]-m[1])<2.5*Math.max(s[1],3)&&Math.abs(cu[2*RN+p]-m[2])<2.5*Math.max(s[2],3));
+    if(idx.length<30)return false;
+  }
+  hm={y:m[0],cb:m[1],cr:m[2],sy:Math.max(s[0],25),scb:Math.max(s[1],4),scr:Math.max(s[2],4),area:bqN};
+  return true;
+}
 function hitXY(X,Y){
   if(X<0||X>1||Y<0||Y>D)return null;
   const v=Y/D;
@@ -256,7 +280,7 @@ function detectStep(){
     stat.textContent='床を読み取り中…';return;
   }
   if(lost>3||motion>2.5){
-    releaseAll();tips=[];
+    releaseAll();tips=[];bqN=0;accN=0;
     stat.textContent=lost>3?'床を見失い中…ゆっくり動かすか置き直してね':'動き中…';return;
   }
   let gs=0,c=0;
@@ -269,10 +293,10 @@ function detectStep(){
     if(!refV[k]){for(let t=0;t<3;t++)ref[t*RN+k]=cu[t*RN+k];refV[k]=1;continue;}
     const y=cu[k],cb=cu[RN+k],cr=cu[2*RN+k];
     const d=Math.abs(y-ref[k]-gs)+Math.abs(cb-ref[RN+k])+Math.abs(cr-ref[2*RN+k]);
-    if(d>T){if(y>40&&cb>77&&cb<127&&cr>133&&cr<173)lab[k]=1;}
+    if(d>T){if(!hm||enrolling||colorOK(y,cb,cr))lab[k]=1;}
     else{ref[k]+=(y-gs-ref[k])*.04;ref[RN+k]+=(cb-ref[RN+k])*.04;ref[2*RN+k]+=(cr-ref[2*RN+k])*.04;}
   }
-  tips=[];
+  tips=[];bqN=0;accN=0;
   for(let s=0;s<RN;s++){
     if(lab[s]!==1)continue;
     let qh=0,qt=0,sx=0,sy=0;que[qt++]=s;lab[s]=2;
@@ -283,7 +307,9 @@ function detectStep(){
       if(y>0&&lab[p-RW]===1){lab[p-RW]=2;que[qt++]=p-RW;}
       if(y<RH-1&&lab[p+RW]===1){lab[p+RW]=2;que[qt++]=p+RW;}
     }
-    if(qt<20)continue;
+    if(qt>bqN){bq.set(que.subarray(0,qt));bqN=qt;}
+    if(enrolling||qt<Math.max(20,hm?hm.area*.25:20))continue;
+    for(let n=0;n<qt;n++)acc[accN++]=que[n];
     const cx=sx/qt,cy=sy/qt,req=Math.sqrt(qt/Math.PI),bd=new Float32Array(24),bi=new Int32Array(24).fill(-1);
     let mx=0;
     for(let n=0;n<qt;n++){
@@ -299,8 +325,9 @@ function detectStep(){
       const p=bi[b];tips.push([PX0+(p%RW+.5)*DX,PY0+(((p/RW)|0)+.5)*DX]);
     }
   }
+  if(enrolling){releaseAll();stat.textContent=bqN>=40?'緑が認識した手。OKなら「この手で登録」':'手をピアノの上に見せてね（袖は映さない）';return;}
   const down=new Set();
-  for(const t of tips){const k=hitXY(t[0],t[1]);if(k)down.add(k);}
+  for(const t of tips){const q=toLoc(t[0],t[1]),k=hitXY(q[0],q[1]);if(k)down.add(k);}
   for(const k of keys){
     if(down.has(k)){k.miss=0;setSrc(k,'cam',true);}
     else if(k.src.cam&&++k.miss>2)setSrc(k,'cam',false);
@@ -315,7 +342,7 @@ function P2S(X,Y){
 }
 function path(p){ctx.beginPath();p.forEach((q,i)=>i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]));ctx.closePath();}
 function qd(x0,x1,y0,y1,l=0){
-  const p=[P2S(x0,y0),P2S(x1,y0),P2S(x1,y1),P2S(x0,y1)];
+  const p=[PL(x0,y0),PL(x1,y0),PL(x1,y1),PL(x0,y1)];
   if(p.some(q=>!q))return null;
   if(l)p.forEach(q=>{q[1]-=l;});
   return p;
@@ -349,9 +376,9 @@ function drawPiano(){
     ctx.shadowColor='#00e5ff';ctx.shadowBlur=k.on?28:6;ctx.fill();ctx.stroke();
   }
   for(const k of blacks){
-    const mx=(k.u0+k.u1)/2,a=P2S(mx,0),b=P2S(mx,.6*D);
+    const mx=(k.u0+k.u1)/2,a=PL(mx,0),b=PL(mx,.6*D);
     const L=a&&b?Math.hypot(a[0]-b[0],a[1]-b[1])*.16:0;
-    const f0=P2S(k.u0,.6*D),f1=P2S(k.u1,.6*D);
+    const f0=PL(k.u0,.6*D),f1=PL(k.u1,.6*D);
     if(f0&&f1){path([f0,f1,[f1[0],f1[1]-L],[f0[0],f0[1]-L]]);ctx.shadowBlur=0;ctx.fillStyle='rgba(0,40,60,.75)';ctx.fill();}
     q=qd(k.u0,k.u1,0,.6*D,L);if(!q)continue;
     path(q);
@@ -362,13 +389,22 @@ function drawPiano(){
   ctx.shadowBlur=0;ctx.fillStyle='rgba(255,255,255,.85)';ctx.textAlign='center';
   for(const k of whites){
     if(k.i%7)continue;
-    const a=P2S(k.u0,.88*D),b=P2S(k.u1,.88*D),c=P2S((k.u0+k.u1)/2,.88*D);
+    const a=PL(k.u0,.88*D),b=PL(k.u1,.88*D),c=PL((k.u0+k.u1)/2,.88*D);
     if(!a||!b||!c)continue;
     ctx.font=Math.max(9,Math.hypot(a[0]-b[0],a[1]-b[1])*.35)+'px system-ui';
     ctx.fillText(k.name,c[0],c[1]);
   }
   ctx.fillStyle='#ffe14d';
   for(const t of tips){const p=P2S(t[0],t[1]);if(p){ctx.beginPath();ctx.arc(p[0],p[1],6,0,7);ctx.fill();}}
+}
+function drawMask(){
+  if(!showMask)return;
+  const n=enrolling?bqN:accN,src=enrolling?bq:acc;
+  ctx.shadowBlur=0;ctx.fillStyle='rgba(60,255,120,.45)';
+  for(let i=0;i<n;i+=2){
+    const p=src[i],q=P2S(PX0+(p%RW+.5)*DX,PY0+(((p/RW)|0)+.5)*DX);
+    if(q)ctx.fillRect(q[0]-2.5,q[1]-2.5,5,5);
+  }
 }
 function drawTaps(){
   ctx.shadowBlur=0;ctx.strokeStyle='#ffe14d';ctx.fillStyle='#ffe14d';ctx.lineWidth=2;
@@ -398,7 +434,7 @@ function frame(){
     ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);
   }
   if(ok&&grab()&&Hs&&!placing){trackStep();detectStep();}
-  if(Hs){if(showGrid)drawGrid();drawPiano();}
+  if(Hs){if(showGrid)drawGrid();drawPiano();drawMask();}
   if(placing)drawTaps();
   requestAnimationFrame(frame);
 }
@@ -414,7 +450,8 @@ function finishPlace(){
   const M=solveH([[0,0],[1,0],[1,D],[0,D]],taps);
   placing=false;
   if(!M){startPlacing();stat.textContent='うまく置けなかった。もう一度タップしてね';return;}
-  Hs=normH(M);pts=[];lost=0;motion=0;refState=0;
+  Hs=normH(M);pts=[];lost=0;motion=0;refState=0;bqN=0;accN=0;enrolling=!hm;
+  $('hand').textContent=enrolling?'この手で登録':'手を登録し直す';
   if(G)addFeatures();
 }
 
@@ -435,7 +472,7 @@ cv.addEventListener('pointerdown',e=>{
   ensureAudio();
   if(placing){taps.push([e.clientX/kx,e.clientY/ky]);if(taps.length===4)finishPlace();else prompt();return;}
   if(!Hs)return;
-  const Hi=inv3(Hs),q=Hi&&apply(Hi,e.clientX/kx,e.clientY/ky),k=q&&hitXY(q[0],q[1]);
+  const Hi=inv3(Hs),q=Hi&&apply(Hi,e.clientX/kx,e.clientY/ky),l=q&&toLoc(q[0],q[1]),k=l&&hitXY(l[0],l[1]);
   if(k){ptrs.set(e.pointerId,k);setSrc(k,'p'+e.pointerId,true);cv.setPointerCapture(e.pointerId);}
 });
 function pup(e){const k=ptrs.get(e.pointerId);if(k){setSrc(k,'p'+e.pointerId,false);ptrs.delete(e.pointerId);}}
@@ -464,6 +501,20 @@ $('grid').onclick=()=>{showGrid=!showGrid;};
 $('mir').onclick=()=>{mirror=!mirror;if(camOn)startPlacing();};
 $('gear').onclick=()=>$('panel').classList.toggle('hide');
 $('ss').oninput=e=>{P.s=+e.target.value;};
+$('sr').oninput=e=>{rot=+e.target.value*Math.PI/180;cs=Math.cos(rot);sn=Math.sin(rot);};
+$('mask').onclick=()=>{showMask=!showMask;};
+$('hand').onclick=()=>{
+  if(!Hs||!camOn)return;
+  if(enrolling){
+    if(learnHand()){
+      enrolling=false;
+      try{localStorage.setItem('arp_hand',JSON.stringify(hm));}catch(e){}
+      stat.textContent='登録OK：緑が認識した手だよ';
+    }else stat.textContent='手がうまく見つからないよ。もう少し大きく見せてね';
+  }else{enrolling=true;releaseAll();}
+  $('hand').textContent=enrolling?'この手で登録':'手を登録し直す';
+};
+try{const sv=localStorage.getItem('arp_hand');if(sv)hm=JSON.parse(sv);}catch(e){}
 resize();frame();
 </script>
 </body>
